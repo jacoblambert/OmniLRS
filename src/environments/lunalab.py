@@ -148,6 +148,37 @@ class LunalabController(BaseEnv):
         self.dem = self.T.getDEM()
         self.mask = self.T.getMask()
 
+    def get_gt_terrain_data(self) -> dict:
+        """
+        Returns the simulator-owned terrain data required to build a GT map.
+        """
+
+        return {
+            "dem": self.dem,
+            "mask": self.mask,
+            "resolution": float(self.T._grid_size),
+            "origin": (float(self.T._mesh_pos[0]), float(self.T._mesh_pos[1])),
+            "stage_roots": (self.scene_name,),
+            "excluded_paths": (f"{self.T._root_path}/Terrain",),
+            "x_axis": 1,
+            "y_axis": 0,
+            "flip_x": False,
+            "flip_y": True,
+        }
+
+    def get_gt_robot_world_pose(self, robot_name: str = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns the world pose of the requested robot.
+        """
+
+        if robot_name is None:
+            robot = next(iter(self.robotManager.robots.values()))
+        else:
+            key = robot_name if robot_name.startswith("/") else f"/{robot_name}"
+            robot = self.robotManager.robots[key]
+        position, orientation = robot.get_pose()
+        return np.asarray(position, dtype=float), np.asarray(orientation, dtype=float)
+
     def collect_interactive_assets(self) -> None:
         """
         Collects the interactive assets from the stage and assigns them to class variables.

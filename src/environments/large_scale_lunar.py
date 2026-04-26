@@ -162,6 +162,43 @@ class LargeScaleController(BaseEnv):
         self.robotManager = robotManager
         self.pose_tracker = list(self.robotManager.robots.values())[0].get_pose
 
+    def get_gt_terrain_data(self) -> dict:
+        """
+        Returns the simulator-owned terrain data required to build a GT map.
+        """
+
+        dem = self.LSTM.map_manager.get_hr_dem()
+        resolution = float(self.LSTM.map_manager.get_hr_dem_res())
+        current_block = self.LSTM.map_manager.hr_dem_gen.get_current_block_coordinates()
+        block_size = float(self.LSTM.map_manager.hr_dem_gen.settings.block_size)
+        origin_x = float(current_block[0] + block_size / 2.0 - dem.shape[0] * resolution / 2.0)
+        origin_y = float(current_block[1] + block_size / 2.0 - dem.shape[1] * resolution / 2.0)
+        return {
+            "dem": dem,
+            "mask": None,
+            "resolution": resolution,
+            "origin": (origin_x, origin_y),
+            "stage_roots": ("/World", self.scene_name),
+            "excluded_paths": ("/World/Terrain",),
+            "x_axis": 0,
+            "y_axis": 1,
+            "flip_x": False,
+            "flip_y": False,
+        }
+
+    def get_gt_robot_world_pose(self, robot_name: str = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns the world pose of the requested robot.
+        """
+
+        if robot_name is None:
+            robot = next(iter(self.robotManager.robots.values()))
+        else:
+            key = robot_name if robot_name.startswith("/") else f"/{robot_name}"
+            robot = self.robotManager.robots[key]
+        position, orientation = robot.get_pose()
+        return np.asarray(position, dtype=float), np.asarray(orientation, dtype=float)
+
     # ==============================================================================
     # Stellar engine control
     # ==============================================================================

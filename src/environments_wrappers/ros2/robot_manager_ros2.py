@@ -7,6 +7,7 @@ __email__ = "antoine.richard@uni.lu"
 __status__ = "development"
 
 from typing import List, Tuple
+import os
 
 from pxr import Gf
 
@@ -31,7 +32,11 @@ class ROS_RobotManager(Node):
         self.create_subscription(String, "/OmniLRS/Robots/Reset", self.reset_robot, 1)
         self.create_subscription(Empty, "/OmniLRS/Robots/ResetAll", self.reset_robots, 1)
 
-        self.domain_id = 0
+        try:
+            self.domain_id = int(os.getenv("ROS_DOMAIN_ID", "177"))
+        except ValueError:
+            self.get_logger().warning("Invalid ROS_DOMAIN_ID value; using fallback 177")
+            self.domain_id = 177
         self.modifications: List[Tuple[callable, dict]] = []
 
     def reset(self) -> None:

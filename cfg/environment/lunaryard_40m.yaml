@@ -56,9 +56,9 @@ rocks_settings:
           sampler:
             name: ThomasCluster
             randomization_space: 2
-            lambda_parent: 0.15
-            lambda_daughter: 20
-            sigma: 1.5
+            lambda_parent: 0.02
+            lambda_daughter: 6
+            sigma: 1.2
             seed: ${.......seed}
 
         req_pos_z:
@@ -95,8 +95,8 @@ rocks_settings:
           axes: ["xyz"]
           layer:
             name: Line
-            xmin: 1.0
-            xmax: 2.0
+            xmin: 4.0
+            xmax: 10.0
           sampler:
             name: Uniform
             randomization_space: 1
@@ -156,8 +156,8 @@ terrain_manager:
         mean_slope: -0.00046
         mean_intercept: -0.0013
 
-    is_yard: False
-    is_lab: True
+    is_yard: True
+    is_lab: False
 
   root_path: /Lunaryard
   texture_path: /Lunaryard/Looks/Basalt
@@ -195,9 +195,24 @@ robots_settings:
 
     -
       robot_name: husky
-      usd_path: assets/USD_Assets/robots/ros2_husky_PhysX_vlp16.usd
+      usd_path: assets/USD_Assets/robots/ros2_husky_PhysX_vlp16_mono_depth_imu.usd
+      sensor_settings:
+        camera_frame_skip_count: 2  # 30 Hz render -> 10 Hz image stream
+        depth_frame_skip_count: 2
+        lidar_horizontal_resolution_deg: 0.18
+        lidar_max_range_m: 300.0
+        lidar_min_range_m: 0.5
+        lidar_rotation_rate_hz: 10.0
+        lidar_vertical_fov_deg: 40.3
+        lidar_vertical_resolution_deg: 1.3
+      controller_settings:
+        max_angular_speed: 4.0
+        max_linear_speed: 1.0
+        max_wheel_speed: 12.0
+        wheel_drive_damping: 10000.0
+        wheel_drive_stiffness: 0.0
       pose:
-        position: [5.0, 5.0, 0.5]
+        position: [20.0, 18.0, 0.5]
         orientation: [1, 0, 0, 0]
-      domain_id: 0
+      domain_id: ${oc.env:ROS_DOMAIN_ID,177}
       target_links: ["front_left_wheel_link", "front_right_wheel_link", "rear_left_wheel_link", "rear_right_wheel_link"]

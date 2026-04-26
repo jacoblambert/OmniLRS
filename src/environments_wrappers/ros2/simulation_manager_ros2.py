@@ -19,6 +19,7 @@ from src.environments_wrappers.ros2.largescale_ros2 import ROS_LargeScaleManager
 from src.environments_wrappers.ros2.lunaryard_ros2 import ROS_LunaryardManager
 from src.environments_wrappers.ros2.robot_manager_ros2 import ROS_RobotManager
 from src.environments_wrappers.ros2.lunalab_ros2 import ROS_LunalabManager
+from src.environments_wrappers.ros2.gt_map_ros2 import ROS_GTMapPublisher
 from src.configurations.procedural_terrain_confs import TerrainManagerConf
 from rclpy.executors import SingleThreadedExecutor as Executor
 from src.physics.physics_scene import PhysicsSceneManager
@@ -201,6 +202,12 @@ class ROS2_SimulationManager:
             self.ROSRobotManager.RM.preload_robot(self.world)
         self.ROSLabManager.LC.add_robot_manager(self.ROSRobotManager.RM)
 
+        self.ROSGTMapPublisher = ROS_GTMapPublisher(self.ROSLabManager.LC, tf_publish_rate_hz=30.0)
+        self.exec3 = Executor()
+        self.exec3.add_node(self.ROSGTMapPublisher)
+        self.exec3_thread = Thread(target=self.exec3.spin, daemon=True, args=())
+        self.exec3_thread.start()
+
         for i in range(100):
             self.world.step(render=True)
         self.world.reset()
@@ -236,12 +243,15 @@ class ROS2_SimulationManager:
                 logger.debug("Destroying the ROS nodes")
                 self.ROSLabManager.destroy_node()
                 self.ROSRobotManager.destroy_node()
+                self.ROSGTMapPublisher.destroy_node()
                 logger.debug("Shutting down the ROS executors")
                 self.exec1.shutdown()
                 self.exec2.shutdown()
+                self.exec3.shutdown()
                 logger.debug("Joining the ROS threads")
                 self.exec1_thread.join()
                 self.exec2_thread.join()
+                self.exec3_thread.join()
                 logger.debug("Shutting down ROS2")
                 rclpy.shutdown()
                 break

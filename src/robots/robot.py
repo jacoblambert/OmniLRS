@@ -56,6 +56,56 @@ class RobotManager:
         self.robots_RG: Dict[str, RobotRigidGroup] = {}
         self.num_robots = 0
 
+    def resolve_sensor_settings(self, robot_name: str, usd_path: str, sensor_settings=None):
+        """
+        Reuses configured sensor settings for matching robots when explicit overrides are absent.
+        """
+
+        if sensor_settings is not None:
+            return sensor_settings
+
+        normalized_name = robot_name if robot_name.startswith("/") else f"/{robot_name}"
+        normalized_usd_path = os.path.normpath(str(usd_path)) if usd_path is not None else None
+
+        for robot_parameter in self.robot_parameters:
+            candidate_name = (
+                robot_parameter.robot_name
+                if robot_parameter.robot_name.startswith("/")
+                else f"/{robot_parameter.robot_name}"
+            )
+            if normalized_name == candidate_name:
+                return robot_parameter.sensor_settings
+
+            if normalized_usd_path is not None and normalized_usd_path == os.path.normpath(robot_parameter.usd_path):
+                return robot_parameter.sensor_settings
+
+        return None
+
+    def resolve_controller_settings(self, robot_name: str, usd_path: str, controller_settings=None):
+        """
+        Reuses configured controller settings for matching robots when explicit overrides are absent.
+        """
+
+        if controller_settings is not None:
+            return controller_settings
+
+        normalized_name = robot_name if robot_name.startswith("/") else f"/{robot_name}"
+        normalized_usd_path = os.path.normpath(str(usd_path)) if usd_path is not None else None
+
+        for robot_parameter in self.robot_parameters:
+            candidate_name = (
+                robot_parameter.robot_name
+                if robot_parameter.robot_name.startswith("/")
+                else f"/{robot_parameter.robot_name}"
+            )
+            if normalized_name == candidate_name:
+                return robot_parameter.controller_settings
+
+            if normalized_usd_path is not None and normalized_usd_path == os.path.normpath(robot_parameter.usd_path):
+                return robot_parameter.controller_settings
+
+        return None
+
     def preload_robot(
         self,
         world: World,
@@ -73,6 +123,8 @@ class RobotManager:
                     robot_parameter.pose.position,
                     robot_parameter.pose.orientation,
                     robot_parameter.domain_id,
+                    robot_parameter.sensor_settings,
+                    robot_parameter.controller_settings,
                 )
                 self.add_RRG(
                     robot_parameter.robot_name,
@@ -101,6 +153,8 @@ class RobotManager:
                     position,
                     orientation,
                     robot_parameter.domain_id,
+                    robot_parameter.sensor_settings,
+                    robot_parameter.controller_settings,
                 )
                 self.add_RRG(
                     robot_parameter.robot_name,
@@ -115,6 +169,8 @@ class RobotManager:
         p: Tuple[float, float, float] = [0, 0, 0],
         q: Tuple[float, float, float, float] = [0, 0, 0, 1],
         domain_id: int = None,
+        sensor_settings=None,
+        controller_settings=None,
     ) -> None:
         """
         Add a robot to the scene.
@@ -129,6 +185,8 @@ class RobotManager:
 
         if robot_name[0] != "/":
             robot_name = "/" + robot_name
+        sensor_settings = self.resolve_sensor_settings(robot_name, usd_path, sensor_settings)
+        controller_settings = self.resolve_controller_settings(robot_name, usd_path, controller_settings)
         if self.num_robots >= self.max_robots:
             pass
         else:
@@ -142,6 +200,8 @@ class RobotManager:
                     is_ROS2=self.is_ROS2,
                     domain_id=domain_id,
                     robots_root=self.robots_root,
+                    sensor_settings=sensor_settings,
+                    controller_settings=controller_settings,
                 )
                 self.robots[robot_name].load(p, q)
                 self.num_robots += 1
@@ -184,6 +244,9 @@ class RobotManager:
             robot_name (str): The name of the robot.
         """
 
+        if robot_name and robot_name[0] != "/":
+            robot_name = "/" + robot_name
+
         if robot_name in self.robots.keys():
             self.robots[robot_name].reset()
         else:
@@ -198,6 +261,9 @@ class RobotManager:
         Args:
             robot_name (str): The name of the robot.
         """
+        if robot_name and robot_name[0] != "/":
+            robot_name = "/" + robot_name
+
         if robot_name in self.robots.keys():
             self.robots[robot_name].teleport(position, orientation)
         else:
@@ -220,6 +286,8 @@ class Robot:
         is_on_nucleus: bool = False,
         is_ROS2: bool = False,
         domain_id: int = 0,
+        sensor_settings=None,
+        controller_settings=None,
     ) -> None:
         """
         Args:
@@ -238,8 +306,184 @@ class Robot:
         self.is_on_nucleus = is_on_nucleus
         self.is_ROS2 = is_ROS2
         self.domain_id = int(domain_id)
+        self.sensor_settings = sensor_settings
+        self.controller_settings = controller_settings
         self.dc = _dynamic_control.acquire_dynamic_control_interface()
         self.root_body_id = None
+
+    def _find_descendants_by_name(self, names: List[str]) -> Dict[str, Usd.Prim]:
+        """
+        Finds named prims under the robot root.
+        """
+
+        found = {}
+        root_prim = self.stage.GetPrimAtPath(self.robot_path)
+        if not root_prim:
+            return found
+
+        for prim in Usd.PrimRange(root_prim):
+            name = prim.GetName()
+            if name in names and name not in found:
+                found[name] = prim
+        return found
+
+    def _find_first_descendant_of_type(self, type_name: str) -> Usd.Prim:
+        """
+        Finds the first prim of the requested type under the robot root.
+        """
+
+        root_prim = self.stage.GetPrimAtPath(self.robot_path)
+        if not root_prim:
+            return Usd.Prim()
+
+        for prim in Usd.PrimRange(root_prim):
+            if prim.GetTypeName() == type_name:
+                return prim
+        return Usd.Prim()
+
+    def _set_attr_if_present(self, prim: Usd.Prim, attr_name: str, value) -> bool:
+        """
+        Sets an attribute when it exists on a prim.
+        """
+
+        if not prim:
+            return False
+
+        attr = prim.GetAttribute(attr_name)
+        if not attr:
+            return False
+
+        attr.Set(value)
+        return True
+
+    def configure_sensor_streams(self) -> None:
+        """
+        Applies optional runtime sensor tuning for remote operation.
+        """
+
+        if self.sensor_settings is None:
+            return
+
+        settings = self.sensor_settings
+        camera_nodes = self._find_descendants_by_name(
+            [
+                "ros2_camera_helper_01",
+                "ros2_camera_helper_02",
+                "ros2_camera_info_helper",
+                "ros2_camera_info_helper_01",
+            ]
+        )
+
+        if settings.camera_frame_skip_count is not None:
+            for node_name in ("ros2_camera_helper_01", "ros2_camera_info_helper"):
+                self._set_attr_if_present(
+                    camera_nodes.get(node_name),
+                    "inputs:frameSkipCount",
+                    int(settings.camera_frame_skip_count),
+                )
+
+        if settings.depth_frame_skip_count is not None:
+            for node_name in ("ros2_camera_helper_02", "ros2_camera_info_helper_01"):
+                self._set_attr_if_present(
+                    camera_nodes.get(node_name),
+                    "inputs:frameSkipCount",
+                    int(settings.depth_frame_skip_count),
+                )
+
+        lidar_prim = self._find_first_descendant_of_type("Lidar")
+
+        lidar_attr_values = {
+            "horizontalResolution": getattr(settings, "lidar_horizontal_resolution_deg", None),
+            "maxRange": getattr(settings, "lidar_max_range_m", None),
+            "minRange": getattr(settings, "lidar_min_range_m", None),
+            "verticalFov": getattr(settings, "lidar_vertical_fov_deg", None),
+            "verticalResolution": getattr(settings, "lidar_vertical_resolution_deg", None),
+        }
+        applied_lidar_attrs = {}
+        for attr_name, value in lidar_attr_values.items():
+            if value is not None and self._set_attr_if_present(lidar_prim, attr_name, float(value)):
+                applied_lidar_attrs[attr_name] = float(value)
+        if applied_lidar_attrs:
+            print(f"applied lidar geometry settings for {self.robot_path}: {applied_lidar_attrs}")
+
+        if settings.lidar_rotation_rate_hz is not None:
+            self._set_attr_if_present(lidar_prim, "rotationRate", float(settings.lidar_rotation_rate_hz))
+
+    def configure_drive_controller(self) -> None:
+        """
+        Applies optional runtime tuning to the robot differential controller graph.
+        """
+
+        array_names_prim = self.stage.GetPrimAtPath(
+            os.path.join(self.robot_path, "Graphs", "differential_controller", "ArrayNames")
+        )
+        array_name_defaults = {
+            "inputs:input0": "front_left_wheel",
+            "inputs:input1": "front_right_wheel",
+            "inputs:input2": "rear_left_wheel",
+            "inputs:input3": "rear_right_wheel",
+        }
+        repaired_array_names = {}
+        if array_names_prim:
+            for attr_name, expected_value in array_name_defaults.items():
+                attr = array_names_prim.GetAttribute(attr_name)
+                current_value = attr.Get() if attr else None
+                if current_value in (None, "") and self._set_attr_if_present(array_names_prim, attr_name, expected_value):
+                    repaired_array_names[attr_name] = expected_value
+        if repaired_array_names:
+            print(f"repaired drive controller joint names for {self.robot_path}: {repaired_array_names}")
+
+        if self.controller_settings is None:
+            return
+
+        controller_prim = self.stage.GetPrimAtPath(
+            os.path.join(self.robot_path, "Graphs", "differential_controller", "differential_controller")
+        )
+        if not controller_prim:
+            warnings.warn(f"differential controller prim not found for {self.robot_path}")
+            return
+
+        settings = self.controller_settings
+        attr_values = {
+            "inputs:maxAcceleration": getattr(settings, "max_acceleration", None),
+            "inputs:maxAngularAcceleration": getattr(settings, "max_angular_acceleration", None),
+            "inputs:maxAngularSpeed": getattr(settings, "max_angular_speed", None),
+            "inputs:maxDeceleration": getattr(settings, "max_deceleration", None),
+            "inputs:maxLinearSpeed": getattr(settings, "max_linear_speed", None),
+            "inputs:maxWheelSpeed": getattr(settings, "max_wheel_speed", None),
+        }
+        applied = {}
+        for attr_name, value in attr_values.items():
+            if value is not None:
+                if self._set_attr_if_present(controller_prim, attr_name, float(value)):
+                    applied[attr_name] = float(value)
+        if applied:
+            print(f"applied drive controller settings for {self.robot_path}: {applied}")
+
+        wheel_stiffness = getattr(settings, "wheel_drive_stiffness", None)
+        wheel_damping = getattr(settings, "wheel_drive_damping", None)
+        if wheel_stiffness is None and wheel_damping is None:
+            return
+
+        wheel_joint_updates = {}
+        root_prim = self.stage.GetPrimAtPath(self.robot_path)
+        if not root_prim:
+            return
+        for prim in Usd.PrimRange(root_prim):
+            if prim.GetTypeName() != "PhysicsRevoluteJoint":
+                continue
+            if "wheel" not in prim.GetName():
+                continue
+            if wheel_stiffness is not None and self._set_attr_if_present(
+                prim, "drive:angular:physics:stiffness", float(wheel_stiffness)
+            ):
+                wheel_joint_updates.setdefault(prim.GetPath().pathString, {})["stiffness"] = float(wheel_stiffness)
+            if wheel_damping is not None and self._set_attr_if_present(
+                prim, "drive:angular:physics:damping", float(wheel_damping)
+            ):
+                wheel_joint_updates.setdefault(prim.GetPath().pathString, {})["damping"] = float(wheel_damping)
+        if wheel_joint_updates:
+            print(f"applied wheel drive settings for {self.robot_path}: {wheel_joint_updates}")
 
     def get_root_rigid_body_path(self) -> None:
         """
@@ -288,6 +532,8 @@ class Robot:
             position=Gf.Vec3d(*position),
             rotation=Gf.Quatd(*orientation),
         )
+        self.configure_sensor_streams()
+        self.configure_drive_controller()
         self.edit_graphs()
 
     def get_pose(self) -> List[float]:
