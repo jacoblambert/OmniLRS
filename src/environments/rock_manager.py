@@ -372,6 +372,8 @@ class RockManager:
                     rock_assets,
                     semantic_class=settings["class"],
                     seed=settings["seed"],
+                    add_colliders=settings.get("add_colliders", False),
+                    collider_mode=settings.get("collider_mode", "none"),
                 )
 
     def randomizeInstancers(self, num: int) -> None:

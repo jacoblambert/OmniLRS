@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 import omni
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 from pxr import Gf, Usd, UsdGeom
 from rclpy.node import Node
@@ -84,8 +84,10 @@ class ROS_GTMapPublisher(Node):
         tf_publish_rate_hz: float = 15.0,
         odom_topic: str = "/odom",
         map_topic: str = "/map",
+        gt_pose_topic: str = "/gt/base_link_pose",
         map_frame: str = "map",
         odom_frame: str = "odom",
+        publish_tf: bool = True,
         obstacle_z_min: float = 0.05,
         obstacle_z_max: float = 1.5,
         max_slope_deg: float = 30.0,
@@ -106,6 +108,7 @@ class ROS_GTMapPublisher(Node):
         self.map_resolution = float(map_resolution)
         self.map_frame = map_frame
         self.odom_frame = odom_frame
+        self.publish_tf = bool(publish_tf)
         self.obstacle_z_min = float(obstacle_z_min)
         self.obstacle_z_max = float(obstacle_z_max)
         self.max_slope = math.tan(math.radians(float(max_slope_deg)))
@@ -123,14 +126,18 @@ class ROS_GTMapPublisher(Node):
         )
 
         self.map_pub = self.create_publisher(OccupancyGrid, map_topic, map_qos)
-        self.tf_broadcaster = TransformBroadcaster(self)
+        self.gt_pose_pub = self.create_publisher(PoseStamped, gt_pose_topic, 10)
+        self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
         self.create_subscription(Odometry, odom_topic, self._odom_callback, 10)
 
         self.create_timer(1.0 / max(float(map_publish_rate_hz), 0.1), self._publish_map)
-        self.create_timer(1.0 / max(float(tf_publish_rate_hz), 1.0), self._publish_tf)
+        self.create_timer(1.0 / max(float(tf_publish_rate_hz), 1.0), self._publish_gt_pose)
+        if self.publish_tf:
+            self.create_timer(1.0 / max(float(tf_publish_rate_hz), 1.0), self._publish_tf)
 
         self.get_logger().info(
-            f"publishing GT map from simulator state on {map_topic} and {map_frame}->{odom_frame}"
+            f"publishing GT map from simulator state on {map_topic}; "
+            f"GT pose on {gt_pose_topic}; GT TF {map_frame}->{odom_frame} enabled={self.publish_tf}"
         )
 
     def _odom_callback(self, msg: Odometry) -> None:
@@ -183,7 +190,7 @@ class ROS_GTMapPublisher(Node):
         self.map_pub.publish(msg)
 
     def _publish_tf(self) -> None:
-        if self.latest_odom is None:
+        if self.latest_odom is None or self.tf_broadcaster is None:
             return
 
         world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
@@ -225,6 +232,21 @@ class ROS_GTMapPublisher(Node):
         transform.transform.rotation.z = qz
         transform.transform.rotation.w = qw
         self.tf_broadcaster.sendTransform(transform)
+
+    def _publish_gt_pose(self) -> None:
+        world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
+
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.map_frame
+        msg.pose.position.x = float(world_position[0])
+        msg.pose.position.y = float(world_position[1])
+        msg.pose.position.z = float(world_position[2]) if len(world_position) > 2 else 0.0
+        msg.pose.orientation.x = float(world_orientation[0])
+        msg.pose.orientation.y = float(world_orientation[1])
+        msg.pose.orientation.z = float(world_orientation[2])
+        msg.pose.orientation.w = float(world_orientation[3])
+        self.gt_pose_pub.publish(msg)
 
     def _build_terrain_occupancy(self, snapshot: GTTerrainSnapshot) -> np.ndarray:
         occupancy = np.zeros_like(snapshot.dem, dtype=bool)

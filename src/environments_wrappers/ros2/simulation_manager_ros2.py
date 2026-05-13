@@ -12,6 +12,7 @@ from isaacsim import SimulationApp
 from isaacsim.core.api.world import World
 from typing import Union
 import logging
+import os
 import omni
 import time
 
@@ -27,6 +28,13 @@ import rclpy
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(format="%(asctime)s %(message)s", datefmt="%m/%d/%Y %I:%M:%S %p")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 class Rate:
@@ -202,7 +210,11 @@ class ROS2_SimulationManager:
             self.ROSRobotManager.RM.preload_robot(self.world)
         self.ROSLabManager.LC.add_robot_manager(self.ROSRobotManager.RM)
 
-        self.ROSGTMapPublisher = ROS_GTMapPublisher(self.ROSLabManager.LC, tf_publish_rate_hz=30.0)
+        self.ROSGTMapPublisher = ROS_GTMapPublisher(
+            self.ROSLabManager.LC,
+            tf_publish_rate_hz=30.0,
+            publish_tf=_env_bool("OMNILRS_GT_TF_ENABLED", True),
+        )
         self.exec3 = Executor()
         self.exec3.add_node(self.ROSGTMapPublisher)
         self.exec3_thread = Thread(target=self.exec3.spin, daemon=True, args=())

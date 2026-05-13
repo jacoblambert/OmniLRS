@@ -42,8 +42,11 @@ rocks_settings:
     medium_rocks:
       seed: ${....seed}
       collections: ["apollo_rocks"] # Where to get the rock models from.
-      use_point_instancer: True # If True, the rocks will be instanced using the PointInstancer.
+      use_point_instancer: False # If True, the rocks will be instanced using the PointInstancer.
                                 # If False, it will use the custom instancer that works for SDG.
+      class: rock
+      add_colliders: True
+      collider_mode: convexHull
       requests: # A list of request used to distribute the rocks.
         req_pos_xy: # The name does not matter.
           attribute: Position

@@ -12,7 +12,7 @@ import os
 from isaacsim.core.utils.prims import delete_prim
 from isaacsim.core.utils.semantics import add_update_semantics
 from pxr import UsdGeom, Gf
-from WorldBuilders.pxr_utils import createObject, createXform
+from WorldBuilders.pxr_utils import addCollision, createObject, createXform
 
 
 def castVec3d(data: np.ndarray):
@@ -35,6 +35,8 @@ class CustomInstancer:
         asset_list: list,
         semantic_class: str = None,
         seed: int = 0,
+        add_colliders: bool = False,
+        collider_mode: str = "none",
     ):
         """
         Args:
@@ -52,6 +54,8 @@ class CustomInstancer:
         self.makeCache()
         self.instance_paths = []
         self.semantic_class = semantic_class
+        self.add_colliders = add_colliders
+        self.collider_mode = collider_mode
         self.rng = np.random.default_rng(seed=seed)
 
     def setInstanceParameter(self, position: np.ndarray, orientation: np.ndarray, scale: np.ndarray) -> None:
@@ -106,6 +110,8 @@ class CustomInstancer:
                 castVec3d(self.scale[i]),
                 True,
             )
+            if self.add_colliders:
+                addCollision(self.stage, prim.GetPath(), mode=self.collider_mode)
             if self.semantic_classes[i] is not None:
                 add_update_semantics(prim, self.semantic_classes[i])
         self.flag = True
