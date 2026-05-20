@@ -37,6 +37,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip()
+
+
 class Rate:
     """
     Creates a rate object that enables to sleep for a minimum amount
@@ -212,6 +219,10 @@ class ROS2_SimulationManager:
 
         self.ROSGTMapPublisher = ROS_GTMapPublisher(
             self.ROSLabManager.LC,
+            odom_topic=f"/{_env_str('ASTROBOT_ROBOT_NAMESPACE', 'astrobot_0').strip('/')}/odom",
+            map_topic="/gt/map",
+            gt_pose_topic="/gt/base_link_pose",
+            map_frame="gt_map",
             tf_publish_rate_hz=30.0,
             publish_tf=_env_bool("OMNILRS_GT_TF_ENABLED", True),
         )

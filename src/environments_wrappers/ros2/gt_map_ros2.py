@@ -72,7 +72,7 @@ def _gf_quat_to_yaw(quaternion) -> float:
 
 class ROS_GTMapPublisher(Node):
     """
-    Publishes a simulator-owned occupancy grid and GT map->odom transform.
+    Publishes simulator-owned ground-truth map products under /gt.
     """
 
     def __init__(
@@ -82,10 +82,10 @@ class ROS_GTMapPublisher(Node):
         map_resolution: float = 0.03,
         map_publish_rate_hz: float = 1.0,
         tf_publish_rate_hz: float = 15.0,
-        odom_topic: str = "/odom",
-        map_topic: str = "/map",
+        odom_topic: str = "/astrobot_0/odom",
+        map_topic: str = "/gt/map",
         gt_pose_topic: str = "/gt/base_link_pose",
-        map_frame: str = "map",
+        map_frame: str = "gt_map",
         odom_frame: str = "odom",
         publish_tf: bool = True,
         obstacle_z_min: float = 0.05,

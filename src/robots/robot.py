@@ -510,6 +510,80 @@ class Robot:
             if self.is_ROS2:
                 prim.GetAttribute("graph:variable:Context").Set(self.domain_id)
 
+    def configure_ros_topic_names(self) -> None:
+        """
+        Normalizes ROS topic names in imported USD graphs.
+
+        OmniLRS robot USDs expose ROS helper topic names as graph attributes.
+        Topic expansion via the graph-level Namespace variable is not applied
+        consistently by imported Isaac ROS helper graphs, so write fully
+        qualified names for robot topics here.
+        """
+
+        if not self.is_ROS2:
+            return
+
+        topic_updates = {}
+        root_prim = self.stage.GetPrimAtPath(self.robot_path)
+        if not root_prim:
+            return
+        robot_namespace = self.robot_name if self.robot_name.startswith("/") else f"/{self.robot_name}"
+
+        for prim in Usd.PrimRange(root_prim):
+            prim_path = prim.GetPath().pathString.lower()
+            for attr in prim.GetAttributes():
+                attr_name = attr.GetName()
+                try:
+                    current_value = attr.Get()
+                except Exception:
+                    continue
+                is_topic_attr = "topic" in attr_name.lower()
+                is_imu_topic_value = "ros2_publish_imu" in prim_path and str(current_value).strip("/") == "imu"
+                is_topic_attr = is_topic_attr or is_imu_topic_value
+                if not is_topic_attr:
+                    continue
+                if not isinstance(current_value, str):
+                    continue
+
+                context = f"{prim_path} {attr_name.lower()} {current_value.lower()}"
+                normalized_value = current_value.strip("/")
+                if "tfrobot" in context:
+                    normalized_value = "/tf"
+                elif "pointcloud" in context or "pcl" in context or "lidar" in context:
+                    normalized_value = "lidar_0/pointcloud/raw"
+                elif "cmd_vel" in context or "twist" in context:
+                    normalized_value = "cmd_vel"
+                elif "odom" in context:
+                    normalized_value = "odom"
+                elif "imu" in context:
+                    normalized_value = "imu"
+                elif "camera_info" in context or "rgb_info" in context:
+                    normalized_value = "camera_0/camera_info"
+                elif "depth" in context:
+                    normalized_value = "camera_0/depth/image_raw"
+                elif "rgb" in context or "image" in context or "camera" in context:
+                    normalized_value = "camera_0/image_raw"
+
+                if normalized_value != "/tf":
+                    normalized_value = f"{robot_namespace}/{normalized_value.lstrip('/')}"
+
+                if normalized_value != current_value:
+                    attr.Set(normalized_value)
+                    topic_updates[f"{prim.GetPath().pathString}:{attr_name}"] = normalized_value
+
+        # The IMU helper topic is stored as an OmniGraph input in some USDs and
+        # may not appear as a normal USD "topic" attribute during traversal.
+        imu_topic = f"{robot_namespace}/imu"
+        imu_attr_path = f"{self.robot_path}/Graphs/ROS_Camera/ros2_publish_imu.inputs:topicName"
+        try:
+            og.Controller.set(og.Controller.attribute(imu_attr_path), imu_topic)
+            topic_updates[imu_attr_path] = imu_topic
+        except Exception:
+            pass
+
+        if topic_updates:
+            print(f"normalized ROS topic names for {self.robot_path}: {topic_updates}")
+
     def load(self, position: np.ndarray, orientation: np.ndarray) -> None:
         """
         Load the robot in the scene, and automatically edit its graphs.
@@ -534,6 +608,7 @@ class Robot:
         )
         self.configure_sensor_streams()
         self.configure_drive_controller()
+        self.configure_ros_topic_names()
         self.edit_graphs()
 
     def get_pose(self) -> List[float]:
