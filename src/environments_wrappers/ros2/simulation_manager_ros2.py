@@ -21,6 +21,7 @@ from src.environments_wrappers.ros2.lunaryard_ros2 import ROS_LunaryardManager
 from src.environments_wrappers.ros2.robot_manager_ros2 import ROS_RobotManager
 from src.environments_wrappers.ros2.lunalab_ros2 import ROS_LunalabManager
 from src.environments_wrappers.ros2.gt_map_ros2 import ROS_GTMapPublisher
+from src.environments_wrappers.ros2.resource_map_ros2 import ROS_ResourceMapPublisher
 from src.configurations.procedural_terrain_confs import TerrainManagerConf
 from rclpy.executors import SingleThreadedExecutor as Executor
 from src.physics.physics_scene import PhysicsSceneManager
@@ -231,6 +232,20 @@ class ROS2_SimulationManager:
         self.exec3_thread = Thread(target=self.exec3.spin, daemon=True, args=())
         self.exec3_thread.start()
 
+        robot_namespace = _env_str("ASTROBOT_ROBOT_NAMESPACE", "astrobot_0").strip("/")
+        self.ROSResourceMapPublisher = ROS_ResourceMapPublisher(
+            self.ROSLabManager.LC,
+            robot_namespace=robot_namespace,
+            robot_name=robot_namespace,
+            map_frame="gt_map",
+            publish_rate_hz=1.0,
+            sample_rate_hz=2.0,
+        )
+        self.exec4 = Executor()
+        self.exec4.add_node(self.ROSResourceMapPublisher)
+        self.exec4_thread = Thread(target=self.exec4.spin, daemon=True, args=())
+        self.exec4_thread.start()
+
         for i in range(100):
             self.world.step(render=True)
         self.world.reset()
@@ -267,14 +282,17 @@ class ROS2_SimulationManager:
                 self.ROSLabManager.destroy_node()
                 self.ROSRobotManager.destroy_node()
                 self.ROSGTMapPublisher.destroy_node()
+                self.ROSResourceMapPublisher.destroy_node()
                 logger.debug("Shutting down the ROS executors")
                 self.exec1.shutdown()
                 self.exec2.shutdown()
                 self.exec3.shutdown()
+                self.exec4.shutdown()
                 logger.debug("Joining the ROS threads")
                 self.exec1_thread.join()
                 self.exec2_thread.join()
                 self.exec3_thread.join()
+                self.exec4_thread.join()
                 logger.debug("Shutting down ROS2")
                 rclpy.shutdown()
                 break

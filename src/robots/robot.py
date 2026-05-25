@@ -539,7 +539,10 @@ class Robot:
                     continue
                 is_topic_attr = "topic" in attr_name.lower()
                 is_imu_topic_value = "ros2_publish_imu" in prim_path and str(current_value).strip("/") == "imu"
-                is_topic_attr = is_topic_attr or is_imu_topic_value
+                is_cmd_vel_topic_value = (
+                    "subscribe_twist" in prim_path and str(current_value).strip("/") == "cmd_vel"
+                )
+                is_topic_attr = is_topic_attr or is_imu_topic_value or is_cmd_vel_topic_value
                 if not is_topic_attr:
                     continue
                 if not isinstance(current_value, str):
@@ -574,15 +577,56 @@ class Robot:
         # The IMU helper topic is stored as an OmniGraph input in some USDs and
         # may not appear as a normal USD "topic" attribute during traversal.
         imu_topic = f"{robot_namespace}/imu"
-        imu_attr_path = f"{self.robot_path}/Graphs/ROS_Camera/ros2_publish_imu.inputs:topicName"
-        try:
-            og.Controller.set(og.Controller.attribute(imu_attr_path), imu_topic)
-            topic_updates[imu_attr_path] = imu_topic
-        except Exception:
-            pass
+        self._set_graph_input_topic(
+            f"{self.robot_path}/Graphs/ROS_Camera/ros2_publish_imu", imu_topic, topic_updates
+        )
+
+        cmd_vel_topic = f"{robot_namespace}/cmd_vel"
+        for cmd_prim_path in (
+            f"{self.robot_path}/Graphs/differential_controller/ros2_subscribe_twist",
+            f"{self.robot_path}/Graphs/Differential_Controller/ros2_subscribe_twist",
+            f"{self.robot_path}/Graphs/ROS_DifferentialController/ros2_subscribe_twist",
+        ):
+            if self._set_graph_input_topic(cmd_prim_path, cmd_vel_topic, topic_updates):
+                break
 
         if topic_updates:
             print(f"normalized ROS topic names for {self.robot_path}: {topic_updates}")
+
+    def _set_graph_input_topic(self, prim_path: str, topic: str, topic_updates: Dict[str, str]) -> bool:
+        attr_name = "inputs:topicName"
+        attr_path = f"{prim_path}.{attr_name}"
+        prim = self.stage.GetPrimAtPath(prim_path)
+        errors = []
+
+        try:
+            attr = self.stage.GetAttributeAtPath(attr_path)
+            if attr:
+                attr.Set(topic)
+                topic_updates[attr_path] = topic
+                return True
+        except Exception as exc:
+            errors.append(f"stage attr: {exc}")
+
+        try:
+            if prim:
+                attr = prim.GetAttribute(attr_name)
+                if attr:
+                    attr.Set(topic)
+                    topic_updates[attr_path] = topic
+                    return True
+        except Exception as exc:
+            errors.append(f"prim attr: {exc}")
+
+        try:
+            og.Controller.set(og.Controller.attribute(attr_path), topic)
+            topic_updates[attr_path] = topic
+            return True
+        except Exception as exc:
+            errors.append(f"omnigraph: {exc}")
+
+        print(f"failed to set ROS topic input {attr_path} -> {topic}: {errors}")
+        return False
 
     def load(self, position: np.ndarray, orientation: np.ndarray) -> None:
         """
