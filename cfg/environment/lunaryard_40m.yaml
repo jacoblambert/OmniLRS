@@ -44,6 +44,10 @@ rocks_settings:
       collections: ["apollo_rocks"] # Where to get the rock models from.
       use_point_instancer: False # If True, the rocks will be instanced using the PointInstancer.
                                 # If False, it will use the custom instancer that works for SDG.
+                                # KEEP FALSE: point-instanced rocks are NOT reliably visible to the
+                                # RTX LiDAR / scene (re-confirmed 2026-06-04 — setting True silently
+                                # removed the rocks from every "rocks-on" run since 2026-06-03; the
+                                # Phase 2 notes already warned about this).
       class: rock
       add_colliders: True
       collider_mode: convexHull
@@ -59,9 +63,21 @@ rocks_settings:
           sampler:
             name: ThomasCluster
             randomization_space: 2
-            lambda_parent: 0.02
-            lambda_daughter: 5
-            sigma: 1.2
+            # lambda_parent: 0.015 (demo4 value, ~48 rocks). NOTE: a bump to 0.018 (~58) in demo5
+            # coincided with 208 precheck path_unknown_fraction rejections (more rocks -> more LiDAR
+            # occlusion shadows -> more unknown cells along paths -> rover budget-exhausted at 1 goal).
+            # Reverted to isolate the BEV slope-correction (only delta from the working demo4). If 0.015
+            # + slope-correction navigates cleanly, re-bump density carefully (occlusion is the limiter).
+            lambda_parent: 0.015
+            # lambda_daughter 5 -> 2 (2026-06-15, demo tuning v2): 5 rocks/cluster x ~32 clusters
+            # (~160 total) was too many AND too clustered -- the dense field walled off the spawn
+            # (reachability collapsed -> rover never moved). 2/cluster thins it and turns the clumps
+            # into loose pairs: navigable lanes + still enough features for stable SLAM.
+            lambda_daughter: 2
+            # sigma 1.2 -> 3.0 (2026-06-15): spreads each cluster's rocks so they scatter rather
+            # than pack into impassable blobs; combined with fewer daughters this gives a sparse,
+            # uniformly-distributed field (GICP features everywhere -> no feature-poor pockets).
+            sigma: 3.0
             seed: ${.......seed}
 
         req_pos_z:
@@ -98,8 +114,28 @@ rocks_settings:
           axes: ["xyz"]
           layer:
             name: Line
-            xmin: 4.0
-            xmax: 10.0
+            # scale 6-10 -> 7-11 (demo tuning v3): shift the whole size distribution up slightly so
+            # rocks are clearly visible/detectable. The lifted FLOOR (7) keeps the smallest well
+            # above BEV detection (obstacle_height), which also lets us raise obstacle_height to
+            # suppress grazing-ring false obstacles without dropping real rocks. (v2 was 6-10; the
+            # original 4-10 produced sub-detectable ~9 cm rocks the rover wedged on.)
+            # floor 7 -> 9 (2026-06-18): diagnosis showed the seed-7 wedge rock sits on a real ~7deg
+            # terrain mound and is only ~0.14m PROUD of its local ground -> marginal vs the gate AND the
+            # rover's ~0.11m clearance. The smallest (scale ~7) rocks embedded on mounds are the wedge
+            # culprits. Raising the floor to 9 makes the smallest rocks stand clearly prouder of the mound
+            # so they clear the (lowered 0.08) detection gate AND are clearly must-avoid. xmax unchanged.
+            # 9 -> 8 (2026-06-18): floor 9 fixed the wedging (explore 0/3->2/3) but over-constrained nav
+            # (seed-411 walled at spawn -> no_candidates; seed-42 MPPI fails + sample_return home 1.09m).
+            # 8 is a gentler bump -- still prouder than the original 7 so the marginal wedge rock clears
+            # the 0.08 gate, but smaller rocks/corridors than 9 to recover navigability.
+            # DIAGNOSED (2026-06-18, tools/diagnose_spawn_obstacles.py): at floor 9 the seed-411 spawn
+            # obstacles are 90% REAL rocks (200/222 on the GT map, not false ground), and reachable_cells
+            # collapses to 3051 / 18-of-52 mission cells -> the tight spawn pocket is physically sealed by
+            # the bigger floor-9 rocks. Exploration reachability uses RAW BEV rock cells (mapper inflation
+            # is 0), so lowering inflation can't reopen it. => floor 8 is the right compromise (411 reaches
+            # 0.73, seed-7 wedging still fixed). Reverted to 8.
+            xmin: 8.0
+            xmax: 11.0
           sampler:
             name: Uniform
             randomization_space: 1
@@ -203,8 +239,16 @@ robots_settings:
         camera_frame_skip_count: 2  # 30 Hz render -> 10 Hz image stream
         depth_frame_skip_count: 2
         lidar_horizontal_resolution_deg: 0.18
-        lidar_max_range_m: 300.0
+        # Reduced 300->100 m (2026-06-02) to cut RTX raycast GPU load on the 8GB
+        # GPU (this is a 40 m arena, so 100 m already covers it with margin).
+        # *** INCREASE THIS for larger environments *** (e.g. lunaryard_80m,
+        # largescale) where useful returns exist beyond 100 m, or SLAM/nav will
+        # be blind to far geometry. Pair with re-checking GPU headroom.
+        lidar_max_range_m: 100.0
         lidar_min_range_m: 0.5
+        # 2026-06-04: global-shutter (0.0) diagnostic ruled OUT motion distortion as the
+        # seed-411/7 GLIM divergence cause (still diverged at 0.0 + 22Hz). Reverted to the
+        # realistic spinning VLP16 (10 Hz). The divergence is GICP/IMU/geometry, not deskew.
         lidar_rotation_rate_hz: 10.0
         lidar_vertical_fov_deg: 40.3
         lidar_vertical_resolution_deg: 1.3

@@ -1,10 +1,18 @@
 renderer:
   renderer: "RayTracedLighting"
   headless: False
-  samples_per_pixel_per_frame: 32
-  max_bounces: 6
-  max_specular_transmission_bounces: 6
-  max_volume_bounces: 4
+  # Render quality. Only affects the CAMERA/viewport image, NOT the LiDAR
+  # (geometry-only depth) or SLAM. Cut to 4/2/1/1 during the GPU-contention era;
+  # restored to a moderate real-time level 16/4 (2026-06-03) now that GLIM moved
+  # to CPU and the camera is back on for the UI (GPU has headroom: ~6.1GB/44%).
+  # Original Isaac defaults were 32/6/6/4 (offline-render overkill). Reconsider
+  # later if the UI camera feed needs more (raise SPP) or for max GPU headroom on
+  # large/multi-robot scenes (lower SPP). specular/volume kept low (lunar scene
+  # has no glass/volumetrics) but must stay > 0 (Isaac AssertionError otherwise).
+  samples_per_pixel_per_frame: 16
+  max_bounces: 4
+  max_specular_transmission_bounces: 1
+  max_volume_bounces: 1
   subdiv_refinement_level: 0
 
 lens_flares:

@@ -8,6 +8,8 @@ __status__ = "development"
 
 
 def startSim(cfg: dict):
+    import os
+    import sys
     from isaacsim import SimulationApp
     import omni
     from src.environments.rendering import set_lens_flares, set_chromatic_aberrations, set_motion_blur
@@ -88,7 +90,34 @@ def startSim(cfg: dict):
 
     # Starts the simulation and allows to import things related to Isaac and PXR
     renderer_cfg = cfg["rendering"]["renderer"]
-    simulation_app = SimulationApp_wait(renderer_cfg.__dict__)
+    launch_config = dict(renderer_cfg.__dict__)
+    path_stat_cache_enabled = launch_config.pop("path_stat_cache_enabled")
+    if not path_stat_cache_enabled:
+        # Kit's import-stat cache retains exception tracebacks from missing paths.
+        # Opt-in experiment: ordinary uncached stat semantics, no GC suppression.
+        launch_config["extra_args"] = ["--/app/extensions/pathStatCacheEnabled=false"]
+    experience = ""
+    experience_profile = os.getenv("OMNILRS_SELECTED_EXPERIENCE", "default")
+    if experience_profile != "default":
+        if (experience_profile != "lean_v1" or not renderer_cfg.headless
+                or os.getenv("OMNILRS_SELECTED_LIDAR") != "true"):
+            raise ValueError("lean experience requires explicit selected headless diagnostic")
+        sys.path.insert(0, "/workspace/terrain-tools")
+        from selected_experience import prepare
+        experience = str(prepare())
+        os.environ["OMNILRS_PREPARED_EXPERIENCE"] = experience
+    simulation_app = SimulationApp_wait(launch_config, experience=experience)
+    if renderer_cfg.disable_viewport_updates:
+        from omni.kit.viewport.utility import get_active_viewport
+
+        viewport = get_active_viewport()
+        if viewport is not None and viewport.updates_enabled:
+            raise RuntimeError("requested headless viewport disabling did not take effect")
+        print(
+            f"VIEWPORT_UPDATE_AUDIT headless={renderer_cfg.headless} "
+            f"active_viewport={viewport is not None} updates_enabled=False",
+            flush=True,
+        )
     set_lens_flares(cfg)
     set_motion_blur(cfg)
     set_chromatic_aberrations(cfg)

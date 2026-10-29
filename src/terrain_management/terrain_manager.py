@@ -189,6 +189,11 @@ class TerrainManager:
         self._sim_verts = np.array(vertices, dtype=np.float32)
         self._sim_uvs = np.array(uvs, dtype=np.float32)
         self._sim_uvs = self._sim_uvs * self._grid_size
+        # A 40 m / 2 cm terrain retains 23,976,006 indices. Keeping these as
+        # Python integers makes every full cyclic-GC pass walk that entire list
+        # during simulation. Preserve exact topology/order and the int64 dtype
+        # previously produced by renderMesh, but store it outside the GC graph.
+        self._indices = np.asarray(self._indices, dtype=np.int64)
 
     def renderMesh(
         self,

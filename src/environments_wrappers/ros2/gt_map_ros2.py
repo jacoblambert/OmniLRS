@@ -10,6 +10,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 from pxr import Gf, Usd, UsdGeom
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from tf2_ros import TransformBroadcaster
@@ -38,6 +39,20 @@ def _normalize_robot_name(robot_name: Optional[str]) -> Optional[str]:
 
 def _path_matches(path: str, prefixes: Sequence[str]) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+
+
+def _is_rock_path(path: str) -> bool:
+    return "Rocks" in path.split("/")
+
+
+def _explicit_rock_instance_root(path: str) -> Optional[str]:
+    parts = [part for part in path.split("/") if part]
+    if "Rocks" not in parts:
+        return None
+    for index, part in enumerate(parts):
+        if part.startswith("instance_") or part.startswith("asset_2_"):
+            return "/" + "/".join(parts[: index + 1])
+    return None
 
 
 def _quat_to_yaw(quaternion_xyzw: Sequence[float]) -> float:
@@ -95,6 +110,8 @@ class ROS_GTMapPublisher(Node):
         mesh_obstacle_padding_m: float = 0.03,
         point_instancer_scale_factor: float = 1.0,
         point_instancer_padding_m: float = 0.03,
+        pose_on_simulation_tick: bool = False,
+        publish_grid_map: bool = True,
     ) -> None:
         super().__init__("omnilrs_gt_map")
 
@@ -129,16 +146,28 @@ class ROS_GTMapPublisher(Node):
         self.gt_pose_pub = self.create_publisher(PoseStamped, gt_pose_topic, 10)
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
         self.create_subscription(Odometry, odom_topic, self._odom_callback, 10)
+        self._last_map_stats_log_sec = 0.0
 
-        self.create_timer(1.0 / max(float(map_publish_rate_hz), 0.1), self._publish_map)
-        self.create_timer(1.0 / max(float(tf_publish_rate_hz), 1.0), self._publish_gt_pose)
+        self._configure_grid_publication(map_publish_rate_hz, publish_grid_map)
+        self._configure_pose_publication(tf_publish_rate_hz, pose_on_simulation_tick)
         if self.publish_tf:
             self.create_timer(1.0 / max(float(tf_publish_rate_hz), 1.0), self._publish_tf)
 
         self.get_logger().info(
             f"publishing GT map from simulator state on {map_topic}; "
-            f"GT pose on {gt_pose_topic}; GT TF {map_frame}->{odom_frame} enabled={self.publish_tf}"
+            f"GT pose on {gt_pose_topic} simulation_tick={self.pose_on_simulation_tick}; "
+            f"GT TF {map_frame}->{odom_frame} enabled={self.publish_tf}"
         )
+
+    def _configure_pose_publication(self, rate, on_tick):
+        self.pose_on_simulation_tick = bool(on_tick)
+        if not self.pose_on_simulation_tick:
+            self.create_timer(1.0 / max(float(rate), 1.0), self._publish_gt_pose)
+
+    def publish_captured_pose(self):
+        """After the immutable physics snapshot; never also run a pose timer."""
+        if self.pose_on_simulation_tick:
+            self._publish_gt_pose()
 
     def _odom_callback(self, msg: Odometry) -> None:
         self.latest_odom = msg
@@ -161,6 +190,14 @@ class ROS_GTMapPublisher(Node):
             flip_y=bool(source.get("flip_y", False)),
         )
 
+    def _configure_grid_publication(self, rate, enabled):
+        # Localization-only experiments need every GT pose, not the approximate
+        # 3 cm global raster. Keep its expensive stage traversal off that profile;
+        # default missions retain it. No ground-truth pose transport changes.
+        self.publish_grid_map = bool(enabled)
+        if self.publish_grid_map:
+            self.create_timer(1.0 / max(float(rate), 0.1), self._publish_map)
+
     def _publish_map(self) -> None:
         snapshot = self._snapshot()
         if snapshot.dem is None:
@@ -170,16 +207,35 @@ class ROS_GTMapPublisher(Node):
         width_cells = max(1, int(math.ceil((map_max_x - map_origin_x) / self.map_resolution)))
         height_cells = max(1, int(math.ceil((map_max_y - map_origin_y) / self.map_resolution)))
         occupancy = np.zeros((height_cells, width_cells), dtype=bool)
+        rock_layer = np.zeros_like(occupancy)
 
-        terrain_occupancy = self._build_terrain_occupancy(snapshot)
-        self._project_source_occupancy(terrain_occupancy, snapshot, occupancy, map_origin_x, map_origin_y)
         self._mark_boundary(occupancy)
-        self._rasterize_stage_obstacles(snapshot, occupancy, map_origin_x, map_origin_y)
+        self._rasterize_stage_obstacles(
+            snapshot,
+            occupancy,
+            map_origin_x,
+            map_origin_y,
+            rock_occupancy=rock_layer,
+        )
 
+        stamp = self.get_clock().now().to_msg()
+        msg = self._make_grid_msg(occupancy, stamp, width_cells, height_cells, map_origin_x, map_origin_y)
+        self.map_pub.publish(msg)
+        self._log_map_stats(occupancy, rock_layer)
+
+    def _make_grid_msg(
+        self,
+        occupancy: np.ndarray,
+        stamp,
+        width_cells: int,
+        height_cells: int,
+        map_origin_x: float,
+        map_origin_y: float,
+    ) -> OccupancyGrid:
         msg = OccupancyGrid()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = stamp
         msg.header.frame_id = self.map_frame
-        msg.info.map_load_time = msg.header.stamp
+        msg.info.map_load_time = stamp
         msg.info.resolution = self.map_resolution
         msg.info.width = width_cells
         msg.info.height = height_cells
@@ -187,10 +243,33 @@ class ROS_GTMapPublisher(Node):
         msg.info.origin.position.y = map_origin_y
         msg.info.origin.orientation.w = 1.0
         msg.data = (occupancy.astype(np.int8) * 100).reshape(-1).tolist()
-        self.map_pub.publish(msg)
+        return msg
+
+    def _log_map_stats(
+        self,
+        occupancy: np.ndarray,
+        rock_layer: np.ndarray,
+    ) -> None:
+        now_sec = float(self.get_clock().now().nanoseconds) * 1e-9
+        if now_sec - self._last_map_stats_log_sec < 10.0:
+            return
+        self._last_map_stats_log_sec = now_sec
+        total = max(1, int(occupancy.size))
+        self.get_logger().info(
+            "GT rock map occupancy cells total=%d %.2f%% rocks=%d %.2f%%"
+            % (
+                int(occupancy.sum()),
+                100.0 * float(occupancy.sum()) / total,
+                int(rock_layer.sum()),
+                100.0 * float(rock_layer.sum()) / total,
+            )
+        )
 
     def _publish_tf(self) -> None:
         if self.latest_odom is None or self.tf_broadcaster is None:
+            return
+        get_snapshot = getattr(self.environment_controller, "get_gt_robot_pose_snapshot", None)
+        if get_snapshot is not None and get_snapshot(self.robot_name) is None:
             return
 
         world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
@@ -234,10 +313,22 @@ class ROS_GTMapPublisher(Node):
         self.tf_broadcaster.sendTransform(transform)
 
     def _publish_gt_pose(self) -> None:
-        world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
+        get_snapshot = getattr(self.environment_controller, "get_gt_robot_pose_snapshot", None)
+        if get_snapshot is not None:
+            snapshot = get_snapshot(self.robot_name)
+            if snapshot is None:
+                return
+            stamp, world_position, world_orientation = snapshot
+            if stamp == getattr(self, "_last_pose_stamp", None):
+                return
+            self._last_pose_stamp = stamp
+            measurement_stamp = Time(seconds=stamp).to_msg()
+        else:
+            world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
+            measurement_stamp = self.get_clock().now().to_msg()
 
         msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = measurement_stamp
         msg.header.frame_id = self.map_frame
         msg.pose.position.x = float(world_position[0])
         msg.pose.position.y = float(world_position[1])
@@ -247,18 +338,6 @@ class ROS_GTMapPublisher(Node):
         msg.pose.orientation.z = float(world_orientation[2])
         msg.pose.orientation.w = float(world_orientation[3])
         self.gt_pose_pub.publish(msg)
-
-    def _build_terrain_occupancy(self, snapshot: GTTerrainSnapshot) -> np.ndarray:
-        occupancy = np.zeros_like(snapshot.dem, dtype=bool)
-        if snapshot.mask is not None:
-            occupancy |= snapshot.mask <= 0.5
-
-        if snapshot.dem.size > 1:
-            gradients = np.gradient(snapshot.dem, snapshot.resolution, snapshot.resolution)
-            slope = np.hypot(gradients[0], gradients[1])
-            occupancy |= slope > self.max_slope
-
-        return occupancy
 
     def _terrain_bounds(self, snapshot: GTTerrainSnapshot) -> tuple[float, float, float, float]:
         width_m = snapshot.dem.shape[snapshot.x_axis] * snapshot.resolution
@@ -315,6 +394,7 @@ class ROS_GTMapPublisher(Node):
         instancer_paths: list[str] = []
         prototype_paths: list[str] = []
         bounds: Optional[tuple[float, float, float, float]] = None
+        explicit_rock_roots: set[str] = set()
         terrain_area = max(1e-6, (terrain_bounds[1] - terrain_bounds[0]) * (terrain_bounds[3] - terrain_bounds[2]))
         max_bounds_area = terrain_area * 4.0
 
@@ -329,6 +409,12 @@ class ROS_GTMapPublisher(Node):
                 instancer_paths.append(path)
                 prototype_paths.extend(str(target) for target in UsdGeom.PointInstancer(prim).GetPrototypesRel().GetTargets())
                 continue
+            rock_root = _explicit_rock_instance_root(path)
+            if rock_root is not None:
+                explicit_rock_roots.add(rock_root)
+                continue
+            if _is_rock_path(path):
+                continue
 
             world_bound = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
             min_point = world_bound.GetMin()
@@ -336,6 +422,20 @@ class ROS_GTMapPublisher(Node):
             if max_point[2] < self.obstacle_z_min or min_point[2] > self.obstacle_z_max:
                 continue
 
+            footprint_area = max(0.0, float(max_point[0] - min_point[0])) * max(0.0, float(max_point[1] - min_point[1]))
+            if footprint_area <= 0.0 or footprint_area > max_bounds_area:
+                continue
+            bounds = self._expand_bounds(bounds, float(min_point[0]), float(max_point[0]), float(min_point[1]), float(max_point[1]))
+
+        for rock_root in explicit_rock_roots:
+            prim = self.stage.GetPrimAtPath(rock_root)
+            if not prim or not self._is_visible(prim):
+                continue
+            world_bound = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
+            min_point = world_bound.GetMin()
+            max_point = world_bound.GetMax()
+            if max_point[2] < self.obstacle_z_min or min_point[2] > self.obstacle_z_max:
+                continue
             footprint_area = max(0.0, float(max_point[0] - min_point[0])) * max(0.0, float(max_point[1] - min_point[1]))
             if footprint_area <= 0.0 or footprint_area > max_bounds_area:
                 continue
@@ -423,6 +523,7 @@ class ROS_GTMapPublisher(Node):
         occupancy: np.ndarray,
         map_origin_x: float,
         map_origin_y: float,
+        rock_occupancy: Optional[np.ndarray] = None,
     ) -> None:
         roots = snapshot.stage_roots or ("/",)
         excluded = snapshot.excluded_paths + ("/Robots",)
@@ -434,6 +535,7 @@ class ROS_GTMapPublisher(Node):
         point_instancers = []
         instancer_paths: list[str] = []
         prototype_paths: list[str] = []
+        explicit_rock_roots: set[str] = set()
         for prim in self._iter_prims(roots):
             path = prim.GetPath().pathString
             if _path_matches(path, excluded):
@@ -444,6 +546,10 @@ class ROS_GTMapPublisher(Node):
                 point_instancers.append(UsdGeom.PointInstancer(prim))
                 instancer_paths.append(path)
                 prototype_paths.extend(str(target) for target in UsdGeom.PointInstancer(prim).GetPrototypesRel().GetTargets())
+                continue
+            rock_root = _explicit_rock_instance_root(path)
+            if rock_root is not None:
+                explicit_rock_roots.add(rock_root)
 
         map_width_m = occupancy.shape[1] * self.map_resolution
         map_height_m = occupancy.shape[0] * self.map_resolution
@@ -465,6 +571,8 @@ class ROS_GTMapPublisher(Node):
                 continue
             if _path_matches(path, instancer_paths) or _path_matches(path, prototype_paths):
                 continue
+            if _is_rock_path(path):
+                continue
             if not any(prim.IsA(geom_type) for geom_type in geometry_types):
                 continue
 
@@ -474,10 +582,28 @@ class ROS_GTMapPublisher(Node):
             footprint_area = max(0.0, max_point[0] - min_point[0]) * max(0.0, max_point[1] - min_point[1])
             if footprint_area > self.max_mesh_footprint_ratio * map_area:
                 continue
-            self._rasterize_aabb(min_point, max_point, occupancy, map_origin_x, map_origin_y)
+            # /gt/map is intentionally a rock-obstacle reference map. Generic
+            # stage geometry is ignored here unless a future evaluation needs it.
+            continue
+
+        for rock_root in explicit_rock_roots:
+            prim = self.stage.GetPrimAtPath(rock_root)
+            if not prim or not self._is_visible(prim):
+                continue
+            world_bound = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
+            min_point = world_bound.GetMin()
+            max_point = world_bound.GetMax()
+            footprint_area = max(0.0, max_point[0] - min_point[0]) * max(0.0, max_point[1] - min_point[1])
+            if footprint_area > self.max_mesh_footprint_ratio * map_area:
+                continue
+            self._rasterize_bound_as_ellipse(min_point, max_point, occupancy, map_origin_x, map_origin_y)
+            if rock_occupancy is not None:
+                self._rasterize_bound_as_ellipse(min_point, max_point, rock_occupancy, map_origin_x, map_origin_y)
 
         for instancer in point_instancers:
             self._rasterize_point_instancer(instancer, bbox_cache, occupancy, map_origin_x, map_origin_y)
+            if rock_occupancy is not None:
+                self._rasterize_point_instancer(instancer, bbox_cache, rock_occupancy, map_origin_x, map_origin_y)
 
     def _iter_prims(self, roots: Sequence[str]) -> Iterable[Usd.Prim]:
         seen_paths: set[str] = set()
@@ -523,6 +649,24 @@ class ROS_GTMapPublisher(Node):
         if col_min > col_max or row_min > row_max:
             return
         occupancy[row_min : row_max + 1, col_min : col_max + 1] = True
+
+    def _rasterize_bound_as_ellipse(
+        self,
+        min_point: Gf.Vec3d,
+        max_point: Gf.Vec3d,
+        occupancy: np.ndarray,
+        map_origin_x: float,
+        map_origin_y: float,
+    ) -> None:
+        if max_point[2] < self.obstacle_z_min or min_point[2] > self.obstacle_z_max:
+            return
+
+        padding = self.mesh_obstacle_padding_m
+        center_x = 0.5 * (float(min_point[0]) + float(max_point[0]))
+        center_y = 0.5 * (float(min_point[1]) + float(max_point[1]))
+        radius_x = max(0.5 * float(max_point[0] - min_point[0]) + padding, self.map_resolution * 0.5)
+        radius_y = max(0.5 * float(max_point[1] - min_point[1]) + padding, self.map_resolution * 0.5)
+        self._rasterize_ellipse(center_x, center_y, radius_x, radius_y, 0.0, occupancy, map_origin_x, map_origin_y)
 
     def _rasterize_point_instancer(
         self,

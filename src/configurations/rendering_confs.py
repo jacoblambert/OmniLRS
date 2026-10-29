@@ -88,6 +88,8 @@ class RendererConf:
     subdiv_refinement_level: int = dataclasses.field(default_factory=int)
     renderer: str = dataclasses.field(default_factory=str)
     headless: bool = dataclasses.field(default_factory=bool)
+    disable_viewport_updates: bool = False
+    path_stat_cache_enabled: bool = True
 
     def __post_init__(self):
         assert type(self.samples_per_pixel_per_frame) is int, "samples_per_pixel_per_frame must be an integer"
@@ -98,6 +100,9 @@ class RendererConf:
         assert type(self.max_volume_bounces) is int, "max_volume_bounces must be an integer"
         assert type(self.subdiv_refinement_level) is int, "subdiv_refinement_level must be an integer"
         assert type(self.headless) is bool, "headless must be a boolean"
+        assert type(self.disable_viewport_updates) is bool, "disable_viewport_updates must be a boolean"
+        assert type(self.path_stat_cache_enabled) is bool, "path_stat_cache_enabled must be a boolean"
+        assert not self.disable_viewport_updates or self.headless, "viewport disabling requires headless mode"
         assert type(self.renderer) is str, "renderer must be a string"
 
         assert self.samples_per_pixel_per_frame > 0, "samples_per_pixel_per_frame must be greater than 0"

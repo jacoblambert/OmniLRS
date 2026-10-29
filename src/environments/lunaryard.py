@@ -201,13 +201,28 @@ class LunaryardController(BaseEnv):
         Returns the world pose of the requested robot.
         """
 
-        if robot_name is None:
-            robot = next(iter(self.robotManager.robots.values()))
-        else:
-            key = robot_name if robot_name.startswith("/") else f"/{robot_name}"
-            robot = self.robotManager.robots[key]
-        position, orientation = robot.get_pose()
+        snapshot = self.get_gt_robot_pose_snapshot(robot_name)
+        if snapshot is None:
+            raise RuntimeError("No physics-step pose snapshot available yet")
+        _, position, orientation = snapshot
         return np.asarray(position, dtype=float), np.asarray(orientation, dtype=float)
+
+    def capture_gt_robot_poses(self, stamp: float) -> None:
+        """Called only on the simulation thread after stepping, never from ROS callbacks."""
+        snapshots = {}
+        for key, robot in self.robotManager.robots.items():
+            position, orientation = robot.get_pose()
+            snapshots[key] = (float(stamp), tuple(float(v) for v in position),
+                              tuple(float(v) for v in orientation))
+        # Atomic reference replacement; readers keep an immutable coherent sample.
+        self._gt_pose_snapshots = snapshots
+
+    def get_gt_robot_pose_snapshot(self, robot_name: str = None):
+        snapshots = getattr(self, "_gt_pose_snapshots", {})
+        if robot_name is None:
+            return next(iter(snapshots.values()), None)
+        key = robot_name if robot_name.startswith("/") else f"/{robot_name}"
+        return snapshots.get(key)
 
     # ==============================================================================
     # Stellar engine control

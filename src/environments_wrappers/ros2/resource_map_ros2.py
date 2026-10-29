@@ -9,6 +9,7 @@ import numpy as np
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32
@@ -160,7 +161,14 @@ class ROS_ResourceMapPublisher(Node):
         xx, yy = np.meshgrid(xs, ys)
         field = np.zeros((height, width), dtype=np.float32)
 
-        if self.mode == "random":
+        centers_env = _env_str("OMNILRS_RESOURCE_CENTERS", "")
+        if centers_env:
+            centers = []
+            for entry in centers_env.split(";"):
+                parts = [p.strip() for p in entry.split(",")]
+                if len(parts) == 4:
+                    centers.append((float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])))
+        elif self.mode == "random":
             count = _env_int("OMNILRS_RESOURCE_RANDOM_GAUSSIANS", 3)
             sigma_min = _env_float("OMNILRS_RESOURCE_RANDOM_SIGMA_MIN", 3.5)
             sigma_max = _env_float("OMNILRS_RESOURCE_RANDOM_SIGMA_MAX", 7.5)
@@ -181,10 +189,12 @@ class ROS_ResourceMapPublisher(Node):
                 for _ in range(max(count, 1))
             ]
         else:
-            offset = float(layer_index) * 1.5
+            # Positions in OmniLRS world frame. For lunaryard_40m the robot starts at
+            # ~(19.875, 18.133) world, so SLAM (sx,sy) = world (19.875-sx, 18.133-sy).
+            offset = float(layer_index) * 2.0
             centers = [
-                (-8.0 + offset, 7.0 - offset, 6.0, 1.0),
-                (8.0 - offset, -6.0 + offset, 5.0, 0.85),
+                (11.875 - offset, 12.133 + offset, 5.0, 1.0),   # SLAM ~(8+2i, 6-2i)
+                (14.875 + offset, 9.133 - offset, 4.5, 0.85),   # SLAM ~(5-2i, 9+2i)
             ]
 
         for cx, cy, sigma, amplitude in centers:
@@ -215,7 +225,16 @@ class ROS_ResourceMapPublisher(Node):
     def _publish_samples(self) -> None:
         if not self.resource_layers:
             return
-        world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
+        get_snapshot = getattr(self.environment_controller, "get_gt_robot_pose_snapshot", None)
+        if get_snapshot is not None:
+            snapshot = get_snapshot(self.robot_name)
+            if snapshot is None:
+                return
+            stamp, world_position, world_orientation = snapshot
+            measurement_stamp = Time(seconds=stamp).to_msg()
+        else:
+            world_position, world_orientation = self.environment_controller.get_gt_robot_world_pose(self.robot_name)
+            measurement_stamp = self.get_clock().now().to_msg()
         x = float(world_position[0])
         y = float(world_position[1])
         for layer in self.resource_layers:
@@ -229,7 +248,7 @@ class ROS_ResourceMapPublisher(Node):
             self.sample_publishers[layer.name].publish(Float32(data=value))
 
             pose = PoseStamped()
-            pose.header.stamp = self.get_clock().now().to_msg()
+            pose.header.stamp = measurement_stamp
             pose.header.frame_id = self.map_frame
             pose.pose.position.x = x
             pose.pose.position.y = y

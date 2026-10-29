@@ -10,16 +10,14 @@ from threading import Thread
 
 from isaacsim import SimulationApp
 from isaacsim.core.api.world import World
-from typing import Union
+from isaacsim.core.nodes.bindings import _isaacsim_core_nodes
 import logging
 import os
 import omni
 import time
 
-from src.environments_wrappers.ros2.largescale_ros2 import ROS_LargeScaleManager
-from src.environments_wrappers.ros2.lunaryard_ros2 import ROS_LunaryardManager
+from src.environments_wrappers.ros2.lab_manager_factory import ROS2_LMF, ROS2_LabManagerFactory
 from src.environments_wrappers.ros2.robot_manager_ros2 import ROS_RobotManager
-from src.environments_wrappers.ros2.lunalab_ros2 import ROS_LunalabManager
 from src.environments_wrappers.ros2.gt_map_ros2 import ROS_GTMapPublisher
 from src.environments_wrappers.ros2.resource_map_ros2 import ROS_ResourceMapPublisher
 from src.configurations.procedural_terrain_confs import TerrainManagerConf
@@ -93,52 +91,6 @@ class Rate:
                 time.sleep(to_sleep)
 
 
-class ROS2_LabManagerFactory:
-    def __init__(self):
-        self._lab_managers = {}
-
-    def register(
-        self,
-        name: str,
-        lab_manager: Union[ROS_LunalabManager, ROS_LunaryardManager],
-    ) -> None:
-        """
-        Registers a lab manager.
-
-        Args:
-            name (str): Name of the lab manager.
-            lab_manager (Union[ROS_LunalabManager, ROS_LunaryardManager]): Instance of the lab manager.
-        """
-
-        self._lab_managers[name] = lab_manager
-
-    def __call__(
-        self,
-        cfg: dict,
-        **kwargs,
-    ) -> Union[ROS_LunalabManager, ROS_LunaryardManager]:
-        """
-        Returns an instance of the lab manager corresponding to the environment name.
-
-        Args:
-            cfg (dict): Configuration dictionary.
-
-        Returns:
-            Union[ROS_LunalabManager, ROS_LunaryardManager]: Instance of the lab manager.
-        """
-
-        return self._lab_managers[cfg["environment"]["name"]](
-            environment_cfg=cfg["environment"],
-            **kwargs,
-        )
-
-
-ROS2_LMF = ROS2_LabManagerFactory()
-ROS2_LMF.register("Lunalab", ROS_LunalabManager)
-ROS2_LMF.register("Lunaryard", ROS_LunaryardManager)
-ROS2_LMF.register("LargeScale", ROS_LargeScaleManager)
-
-
 class ROS2_SimulationManager:
     """
     Manages the simulation. This class is responsible for:
@@ -166,18 +118,28 @@ class ROS2_SimulationManager:
         self.simulation_app = simulation_app
         # Setups the physics and acquires the different interfaces to talk with Isaac
         self.timeline = omni.timeline.get_timeline_interface()
+        self.sensor_clock = _isaacsim_core_nodes.acquire_interface()
+        from src.configurations.simulation_timing import simulation_timing
+        self.timing = simulation_timing(cfg["environment"]["physics_dt"], cfg["environment"]["rendering_dt"],
+                                        cfg["physics"]["physics_scene"].dt)
+        logger.warning("Resolved simulation timing: %s", self.timing)
         self.world = World(
             stage_units_in_meters=1.0,
-            physics_dt=cfg["environment"]["physics_dt"],
-            rendering_dt=cfg["environment"]["rendering_dt"],
+            physics_dt=self.timing["physics_dt"],
+            rendering_dt=self.timing["rendering_dt"],
         )
         PSM = PhysicsSceneManager(cfg["physics"]["physics_scene"])
+        # The second PhysicsContext resets minFrameRate/substeps to one. Apply
+        # the common contract after it, including the exact integral render
+        # ratio, or sensor time advances twice as fast as physics time at 30/60Hz.
+        self.world.set_simulation_dt(physics_dt=self.timing["physics_dt"],
+                                     rendering_dt=self.timing["rendering_dt"])
         for i in range(100):
             self.world.step(render=True)
         self.world.reset()
 
         if cfg["environment"]["enforce_realtime"]:
-            self.rate = Rate(dt=cfg["environment"]["physics_dt"])
+            self.rate = Rate(dt=self.timing["rendering_dt"])
         else:
             self.rate = Rate(is_disabled=True)
 
@@ -226,6 +188,8 @@ class ROS2_SimulationManager:
             map_frame="gt_map",
             tf_publish_rate_hz=30.0,
             publish_tf=_env_bool("OMNILRS_GT_TF_ENABLED", True),
+            pose_on_simulation_tick=_env_bool("OMNILRS_NATURAL_HOLDOUT", False) or _env_bool("OMNILRS_SELECTED_NAV", False),
+            publish_grid_map=_env_bool("OMNILRS_GT_MAP_ENABLED", True),
         )
         self.exec3 = Executor()
         self.exec3.add_node(self.ROSGTMapPublisher)
@@ -255,24 +219,54 @@ class ROS2_SimulationManager:
         Runs the simulation.
         """
 
+        self.physics_imu_shadow = None
+        if _env_bool("OMNILRS_PHYSICS_IMU", False):
+            from src.environments_wrappers.ros2.physics_imu_ros2 import PhysicsIMUShadow
+            self.physics_imu_shadow = PhysicsIMUShadow(self.ROSRobotManager, self.world, self.sensor_clock)
+        self.terrain_gt_probe = None
+        if _env_bool("OMNILRS_NATURAL_HOLDOUT", False):
+            from src.environments_wrappers.ros2.natural_holdout_capture import NaturalHoldoutCapture
+            self.terrain_gt_probe = NaturalHoldoutCapture(self.ROSLabManager.LC)
+        if _env_bool("OMNILRS_SELECTED_NAV", False):
+            if self.terrain_gt_probe is not None:
+                raise ValueError("selected nav stream is exclusive with captures")
+            from src.environments_wrappers.ros2.selected_nav_stream import SelectedNavStream
+            self.terrain_gt_probe = SelectedNavStream(self.ROSLabManager.LC)
+        if _env_bool("OMNILRS_TERRAIN_GT_PROBE", False):
+            from src.environments_wrappers.ros2.terrain_gt_probe import TerrainGTProbe
+            self.terrain_gt_probe = TerrainGTProbe(self.ROSLabManager.LC)
         self.timeline.play()
+        timed = getattr(self.terrain_gt_probe, "timed_call", lambda name, function, *a, **kw: function(*a, **kw))
         while self.simulation_app.is_running():
             self.rate.reset()
-            self.world.step(render=True)
+            if self.terrain_gt_probe is not None:
+                before = getattr(self.terrain_gt_probe, "pre_step", None)
+                if before is not None:
+                    timed("sensor_pre_step", before)
+            timed("world_step", self.world.step, render=True)
             if self.world.is_playing():
+                capture = getattr(self.ROSLabManager.LC, "capture_gt_robot_poses", None)
+                if capture is not None:
+                    # IsaacReadSimulationTime (resetOnStop=false), used by the
+                    # ROS clock and sensors, survives World.reset(). World time
+                    # does not: warm-up resets otherwise offset GT by ~1.8 s.
+                    timed("gt_capture", capture, self.sensor_clock.get_sim_time_monotonic())
+                    timed("gt_publish", self.ROSGTMapPublisher.publish_captured_pose)
+                if self.terrain_gt_probe is not None:
+                    timed("capture_tick", self.terrain_gt_probe.tick, self.sensor_clock.get_sim_time_monotonic())
                 # Apply modifications to the lab only once the simulation step is finished
                 # This is extremely important as modifying the stage during a simulation step
                 # will lead to a crash.
-                self.ROSLabManager.periodic_update(dt=self.world.get_physics_dt())
+                timed("lab_update", self.ROSLabManager.periodic_update, dt=self.world.get_physics_dt())
                 if self.world.current_time_step_index == 0:
                     self.world.reset()
                     self.ROSLabManager.reset()
                     self.ROSRobotManager.reset()
-                self.ROSLabManager.apply_modifications()
+                timed("lab_modifications", self.ROSLabManager.apply_modifications)
                 if self.ROSLabManager.trigger_reset:
                     self.ROSRobotManager.reset()
                     self.ROSLabManager.trigger_reset = False
-                self.ROSRobotManager.apply_modifications()
+                timed("robot_modifications", self.ROSRobotManager.apply_modifications)
                 if self.enable_deformation:
                     if self.world.current_time_step_index >= (self.deform_delay * self.world.get_physics_dt()):
                         self.ROSLabManager.LC.deform_terrain()
@@ -297,6 +291,6 @@ class ROS2_SimulationManager:
                 rclpy.shutdown()
                 break
 
-            self.rate.sleep()
+            timed("rate_sleep", self.rate.sleep)
         self.world.stop()
         self.timeline.stop()
